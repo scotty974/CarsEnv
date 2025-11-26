@@ -4,6 +4,7 @@ from pandas.core.arrays.datetimelike import F
 from utils.calculs import (
     calcul_acceleration,
     calcul_aero_drag,
+    calcul_brake_force,
     calcul_consommation,
     calcul_engine_power,
     calcul_engine_speed,
@@ -48,6 +49,7 @@ class Environment:
         self.transmission_ratio = transmission_ratio
         self.wheel_radius = wheel_radius
         self.bsfc = 0.280  # kg/kwh
+        self.brake_force_max = 0.0
 
     def get_state_min(self):
         return self.state_min
@@ -84,31 +86,25 @@ class Environment:
                 T_limite = self.P_max / omega_engine
                 T_effectif = min(c, T_limite)
             else:
-                T_effectif = 0  # Au démarrage (omega=0), on prend le couple de la map
+                T_effectif = c
 
-            # ⚠️ CORRECTION MAJEURE : Force aux roues
-            # Le couple moteur est multiplié par le rapport de transmission
-            # puis divisé par le rayon de roue pour obtenir la force
-            F_moteur = (T_effectif * self.transmission_ratio) / self.wheel_radius
-
-            # Puissance moteur
+            F_roue = (T_effectif * self.transmission_ratio) / self.wheel_radius
             power = calcul_engine_power(T_effectif, omega_engine)
 
         else:
-            # Freinage
-            if v_current > 0.1:
-                F_moteur = -self.F_max
-            elif v_current < -0.1:
-                F_moteur = self.F_max
+            F_frein_max = calcul_brake_force(0.8, self.mass, self.gravity)
+            F_frein = F_frein_max * (abs(v_current) / self.v_max)
+
+            # Freinage -> force opposée au mouvement
+            if v_current > 0:
+                F_roue = -F_frein
+            elif v_current < 0:
+                F_roue = F_frein
             else:
-                F_moteur = 0
+                F_roue = 0
 
-            power = 0  # Pas de puissance moteur en freinage
+            power = 0
 
-        # ⚠️ CORRECTION : F_moteur EST DÉJÀ la force aux roues
-        F_roue = F_moteur
-
-        # Force résultante (SANS signe négatif devant f_pente si votre fonction retourne déjà le bon signe)
         array = np.array([F_roue, -f_aero, -f_roll, -f_pente])
         f_result = result_force(array)
 
@@ -124,11 +120,9 @@ class Environment:
 
         x = calcul_position(x_current, v, self.dt)
 
-        # ⚠️ CORRECTION CONSOMMATION : Toujours positive ou nulle
         if actions == 1 and power > 0:
             consommation_instantanee = calcul_consommation(power, self.bsfc)
             consommation_totale += consommation_instantanee * (self.dt / 3600)
-        # Sinon on ne consomme rien (freinage ou moteur arrêté)
 
         # Mise à jour
         self.state_min = [v, x, a, power, consommation_totale]
@@ -142,7 +136,7 @@ class Environment:
             f"Puissance mot : {power:.2f} W\n"
             f"Consommation  : {consommation_totale:.4f} kg\n"
             f"--- Debug ---\n"
-            f"F_moteur      : {F_moteur:.2f} N\n"
+            f"F_roue      : {F_roue:.2f} N\n"
             f"F_aero        : {f_aero:.2f} N\n"
             f"F_roll        : {f_roll:.2f} N\n"
             f"F_pente       : {f_pente:.2f} N\n"
@@ -157,180 +151,180 @@ class Environment:
             print("Aucune donnée à afficher")
             return
 
-        # Préparer les données
+        # --- 1. Préparation des données ---
         temps = np.arange(len(self.data)) * self.dt
 
-        # Extraire toutes les données
-        vitesses = [state[0] for state in self.data]
-        positions = [state[1] for state in self.data]
-        accelerations = [state[2] for state in self.data]
-        puissances = [state[3] for state in self.data]
-        consommations = [state[4] for state in self.data]
+        # Extraction
+        vitesses = np.array([state[0] for state in self.data])
+        positions = np.array([state[1] for state in self.data])
+        accelerations = np.array([state[2] for state in self.data])
+        puissances = np.array([state[3] for state in self.data])
+        conso_cumul_kg = np.array([state[4] for state in self.data])  # Conso cumulée
 
-        # Calculer les données supplémentaires
-        vitesses_kmh = [v * 3.6 for v in vitesses]
+        # Conversions
+        vitesses_kmh = vitesses * 3.6
+        positions_km = positions / 1000
+        puissances_kw = puissances / 1000
 
-        # RPM et couple
+        # Recalcul RPM et Couple pour l'analyse
         rpms = []
-        couples = []
-        forces_motrices = []
+        couples_utilises = []
 
-        for v in vitesses:
+        for v, p_kw in zip(vitesses, puissances_kw):
             omega = calcul_engine_speed(
                 abs(v), self.wheel_radius, self.transmission_ratio
             )
             rpm = omega * 60 / (2 * np.pi)
-            c = make_interpolated_function(rpm)
-            F_moteur = (c * self.transmission_ratio) / self.wheel_radius
-
             rpms.append(rpm)
-            couples.append(c)
-            forces_motrices.append(F_moteur)
 
-        # Consommation instantanée (L/100km)
-        conso_instantanee = []
-        for i, v in enumerate(vitesses):
-            if abs(v) > 0.1 and puissances[i] > 0:
-                # Consommation en kg/s
-                conso_kg_s = puissances[i] * self.bsfc / 3600
-                # Convertir en L/100km (densité essence ~0.75 kg/L)
-                conso_L_100km = (conso_kg_s / 0.75) * (3600 / abs(v)) * 100000
-                conso_instantanee.append(
-                    min(conso_L_100km, 50)
-                )  # Limiter à 50 L/100km pour lisibilité
+            # Couple réel utilisé (déduit de la puissance: C = P / w)
+            if omega > 0 and p_kw > 0:
+                c_used = (p_kw * 1000) / omega
             else:
-                conso_instantanee.append(0)
+                c_used = 0
+            couples_utilises.append(c_used)
 
-        # Créer la figure avec 8 subplots (2 colonnes)
-        fig = plt.figure(figsize=(16, 12))
+        # Calcul Conso Instantanée (L/100km) avec gestion des erreurs
+        conso_l_100 = []
+        for i, v in enumerate(vitesses):
+            # On évite la division par zéro et les valeurs aberrantes à très basse vitesse
+            if abs(v) > 1.0 and puissances[i] > 0:
+                # Conso (kg/s) = Power (kW) * BSFC (kg/kWh) / 3600
+                dm_dt = (puissances[i] * self.bsfc) / 3600
+                # L/100km = (L/s) / (km/s) * 100
+                # Densité essence approx 0.75 kg/L
+                vol_rate = dm_dt / 0.75
+                km_s = abs(v) / 1000
+                val = (vol_rate / km_s) * 100
+                conso_l_100.append(
+                    min(val, 60)
+                )  # Cap à 60 L/100 pour lisibilité graphique
+            else:
+                conso_l_100.append(0)
 
-        # Subplot 1: Vitesse (km/h)
-        ax1 = plt.subplot(4, 2, 1)
-        ax1.plot(temps, vitesses_kmh, "b-", linewidth=2)
-        ax1.set_ylabel("Vitesse (km/h)", fontsize=11, fontweight="bold")
-        ax1.grid(True, alpha=0.3)
-        ax1.set_title("Profil de vitesse", fontsize=12, fontweight="bold")
+        # --- Style global ---
+        plt.style.use("ggplot")  # Style plus propre (ou 'seaborn-darkgrid')
 
-        # Subplot 2: Position
-        ax2 = plt.subplot(4, 2, 2)
-        ax2.plot(temps, [p / 1000 for p in positions], "g-", linewidth=2)
-        ax2.set_ylabel("Distance (km)", fontsize=11, fontweight="bold")
-        ax2.grid(True, alpha=0.3)
-        ax2.set_title("Distance parcourue", fontsize=12, fontweight="bold")
-
-        # Subplot 3: Accélération
-        ax3 = plt.subplot(4, 2, 3)
-        ax3.plot(temps, accelerations, "r-", linewidth=2)
-        ax3.axhline(y=0, color="k", linestyle="--", alpha=0.3)
-        ax3.set_ylabel("Accélération (m/s²)", fontsize=11, fontweight="bold")
-        ax3.grid(True, alpha=0.3)
-        ax3.set_title("Accélération", fontsize=12, fontweight="bold")
-
-        # Subplot 4: Régime moteur (RPM)
-        ax4 = plt.subplot(4, 2, 4)
-        ax4.plot(temps, rpms, "purple", linewidth=2)
-        ax4.set_ylabel("Régime (RPM)", fontsize=11, fontweight="bold")
-        ax4.grid(True, alpha=0.3)
-        ax4.set_title("Régime moteur", fontsize=12, fontweight="bold")
-
-        # Subplot 5: Couple moteur
-        ax5 = plt.subplot(4, 2, 5)
-        ax5.plot(temps, couples, "orange", linewidth=2)
-        ax5.set_ylabel("Couple (Nm)", fontsize=11, fontweight="bold")
-        ax5.grid(True, alpha=0.3)
-        ax5.set_title("Couple moteur", fontsize=12, fontweight="bold")
-
-        # Subplot 6: Courbe Couple-Régime (comme sur une fiche technique)
-        ax6 = plt.subplot(4, 2, 6)
-        ax6.plot(
-            rpms,
-            couples,
-            "o-",
-            color="darkorange",
-            linewidth=2,
-            markersize=3,
-            alpha=0.6,
+        # ==========================================
+        # FIGURE 1 : DYNAMIQUE VÉHICULE
+        # ==========================================
+        fig1, (ax1, ax2, ax3) = plt.subplots(
+            3, 1, figsize=(10, 10), sharex=True, constrained_layout=True
         )
-        ax6.set_xlabel("Régime (RPM)", fontsize=11, fontweight="bold")
-        ax6.set_ylabel("Couple (Nm)", fontsize=11, fontweight="bold")
-        ax6.grid(True, alpha=0.3)
-        ax6.set_title("Courbe Couple/Régime", fontsize=12, fontweight="bold")
+        fig1.suptitle("Dynamique du Véhicule", fontsize=16, fontweight="bold")
 
-        # Subplot 7: Puissance moteur
-        ax7 = plt.subplot(4, 2, 7)
-        ax7.plot(temps, [p / 1000 for p in puissances], "cyan", linewidth=2)
-        ax7.set_xlabel("Temps (s)", fontsize=11, fontweight="bold")
-        ax7.set_ylabel("Puissance (kW)", fontsize=11, fontweight="bold")
-        ax7.grid(True, alpha=0.3)
-        ax7.set_title("Puissance moteur", fontsize=12, fontweight="bold")
+        # 1. Vitesse
+        ax1.plot(temps, vitesses_kmh, color="tab:blue", linewidth=2)
+        ax1.set_ylabel("Vitesse (km/h)", fontweight="bold")
+        ax1.grid(True, alpha=0.5)
+        ax1.fill_between(
+            temps, vitesses_kmh, color="tab:blue", alpha=0.1
+        )  # Effet de remplissage
 
-        # Subplot 8: Consommation instantanée
-        ax8 = plt.subplot(4, 2, 8)
-        ax8.plot(temps, conso_instantanee, "brown", linewidth=2)
-        ax8.set_xlabel("Temps (s)", fontsize=11, fontweight="bold")
-        ax8.set_ylabel("Consommation (L/100km)", fontsize=11, fontweight="bold")
-        ax8.grid(True, alpha=0.3)
-        ax8.set_title("Consommation instantanée", fontsize=12, fontweight="bold")
+        # 2. Accélération
+        ax2.plot(temps, accelerations, color="tab:red", linewidth=1.5)
+        ax2.set_ylabel("Accélération (m/s²)", fontweight="bold")
+        ax2.axhline(0, color="black", linestyle="--", alpha=0.5)  # Ligne zéro
+        ax2.grid(True, alpha=0.5)
 
-        # Ajuster l'espacement
-        plt.tight_layout()
+        # 3. Position
+        ax3.plot(temps, positions_km, color="tab:green", linewidth=2)
+        ax3.set_ylabel("Distance (km)", fontweight="bold")
+        ax3.set_xlabel("Temps (s)", fontweight="bold")
+        ax3.grid(True, alpha=0.5)
 
-        # Ajouter un titre global
-        fig.suptitle(
-            "Simulation de conduite - Analyse complète",
-            fontsize=16,
-            fontweight="bold",
-            y=0.998,
-        )
-        plt.subplots_adjust(top=0.96)
+        # ==========================================
+        # FIGURE 2 : MOTORISATION & ÉNERGIE
+        # ==========================================
+        fig2 = plt.figure(figsize=(14, 8), constrained_layout=True)
+        gs = fig2.add_gridspec(2, 2)  # Grille 2x2
+        fig2.suptitle("Analyse Moteur & Consommation", fontsize=16, fontweight="bold")
 
-        plt.show()
+        # A. Carte de fonctionnement Moteur (Scatter Plot)
+        ax_map = fig2.add_subplot(gs[:, 0])  # Prend toute la colonne gauche
 
-        # Afficher aussi la courbe couple/régime théorique
-        self.plot_torque_curve()
-
-    def plot_torque_curve(self):
-        """Affiche la courbe de couple théorique du moteur"""
+        # 1. Tracer la courbe max théorique (fond de carte)
         from utils.calculs import torque_map_rpm
 
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
-
-        # Extraire les données de la map
         rpms_map = [p for p, t in torque_map_rpm]
         torques_map = [t for p, t in torque_map_rpm]
+        # Interpolation lisse pour le tracé
+        x_smooth = np.linspace(min(rpms_map), max(rpms_map), 200)
+        y_smooth = [make_interpolated_function(r) for r in x_smooth]
 
-        # Générer une courbe interpolée
-        rpms_interp = np.linspace(min(rpms_map), max(rpms_map), 200)
-        torques_interp = [make_interpolated_function(rpm) for rpm in rpms_interp]
-        puissances_interp = [
-            t * (rpm * 2 * np.pi / 60) / 1000
-            for t, rpm in zip(torques_interp, rpms_interp)
-        ]
-
-        # Graphique 1: Couple
-        ax1.plot(rpms_interp, torques_interp, "b-", linewidth=2, label="Couple")
-        ax1.plot(rpms_map, torques_map, "ro", markersize=8, label="Points de mesure")
-        ax1.set_xlabel("Régime moteur (RPM)", fontsize=12, fontweight="bold")
-        ax1.set_ylabel("Couple (Nm)", fontsize=12, fontweight="bold", color="b")
-        ax1.tick_params(axis="y", labelcolor="b")
-        ax1.grid(True, alpha=0.3)
-        ax1.legend(loc="upper right")
-        ax1.set_title("Courbe de couple moteur", fontsize=13, fontweight="bold")
-
-        # Graphique 2: Puissance
-        ax2.plot(rpms_interp, puissances_interp, "r-", linewidth=2, label="Puissance")
-        ax2.axhline(
-            y=self.P_max / 1000,
-            color="orange",
-            linestyle="--",
-            label=f"P_max = {self.P_max / 1000:.0f} kW",
+        ax_map.plot(
+            x_smooth, y_smooth, "k--", linewidth=2, label="Couple Max (Théorique)"
         )
-        ax2.set_xlabel("Régime moteur (RPM)", fontsize=12, fontweight="bold")
-        ax2.set_ylabel("Puissance (kW)", fontsize=12, fontweight="bold", color="r")
-        ax2.tick_params(axis="y", labelcolor="r")
-        ax2.grid(True, alpha=0.3)
-        ax2.legend(loc="upper left")
-        ax2.set_title("Courbe de puissance moteur", fontsize=13, fontweight="bold")
+        ax_map.fill_between(x_smooth, y_smooth, alpha=0.1, color="gray")
 
-        plt.tight_layout()
+        # 2. Tracer les points de fonctionnement réels
+        # On filtre les points où le moteur est allumé (RPM > 500 et Couple > 0)
+        mask = (np.array(rpms) > 500) & (np.array(couples_utilises) > 0)
+        sc = ax_map.scatter(
+            np.array(rpms)[mask],
+            np.array(couples_utilises)[mask],
+            c=np.array(conso_l_100)[mask],  # Couleur selon la conso instantanée
+            cmap="plasma",
+            s=15,
+            alpha=0.7,
+            label="Points de fonctionnement",
+        )
+        plt.colorbar(sc, ax=ax_map, label="Conso Inst. (L/100km)")
+
+        ax_map.set_xlabel("Régime Moteur (tr/min)", fontweight="bold")
+        ax_map.set_ylabel("Couple Moteur (Nm)", fontweight="bold")
+        ax_map.set_title("Points de Fonctionnement Moteur", fontweight="bold")
+        ax_map.legend(loc="upper right")
+        ax_map.grid(True)
+
+        # B. Puissance Temporelle
+        ax_power = fig2.add_subplot(gs[0, 1])
+        ax_power.plot(temps, puissances_kw, color="tab:cyan", linewidth=1.5)
+        ax_power.fill_between(temps, puissances_kw, alpha=0.2, color="tab:cyan")
+        ax_power.set_ylabel("Puissance (kW)", fontweight="bold")
+        ax_power.set_title("Puissance développée", fontweight="bold")
+        ax_power.grid(True)
+
+        # C. Consommation (Double Axe : L/100km et Litres Totaux)
+        ax_conso = fig2.add_subplot(gs[1, 1], sharex=ax_power)
+
+        # Axe Gauche : L/100km
+        line1 = ax_conso.plot(
+            temps,
+            conso_l_100,
+            color="tab:purple",
+            linewidth=1,
+            alpha=0.8,
+            label="Inst. (L/100km)",
+        )
+        ax_conso.set_ylabel("L/100km", color="tab:purple", fontweight="bold")
+        ax_conso.tick_params(axis="y", labelcolor="tab:purple")
+        ax_conso.set_ylim(0, 50)  # Limite visuelle
+
+        # Axe Droit : Litres cumulés
+        ax_cumul = ax_conso.twinx()
+        # Conversion kg -> Litres (densité ~0.75)
+        litres_cumules = conso_cumul_kg / 0.75
+        line2 = ax_cumul.plot(
+            temps,
+            litres_cumules,
+            color="tab:brown",
+            linewidth=2,
+            linestyle="--",
+            label="Cumul (L)",
+        )
+        ax_cumul.set_ylabel(
+            "Consommation Totale (L)", color="tab:brown", fontweight="bold"
+        )
+        ax_cumul.tick_params(axis="y", labelcolor="tab:brown")
+
+        ax_conso.set_xlabel("Temps (s)", fontweight="bold")
+        ax_conso.set_title("Consommation de Carburant", fontweight="bold")
+        ax_conso.grid(True)
+
+        # Légende combinée
+        lines = line1 + line2
+        labels = [l.get_label() for l in lines]
+        ax_conso.legend(lines, labels, loc="upper left")
+
         plt.show()

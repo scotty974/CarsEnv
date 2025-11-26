@@ -29,6 +29,10 @@ def make_interpolated_function(rpm):
     return float(np.interp(rpm, rpms, torques))
 
 
+def calcul_brake_force(c, m, g):
+    return c * m * g
+
+
 ######################## Calcul des forces
 # paramètres
 # p = densité de l'aire
