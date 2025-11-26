@@ -12,7 +12,7 @@ print(f"  - Surface frontale: {env.surface_frontal_area} m²")
 print("\n" + "=" * 70)
 
 actions_urbain = (
-    [1] * 5  # Accélération départ
+    [1] * 15  # Accélération départ
     + [1] * 10  # Maintien 30 km/h
     + [0] * 15  # Freinage feu rouge
     + [1] * 5  # Redémarrage
