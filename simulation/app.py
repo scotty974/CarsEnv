@@ -2,7 +2,7 @@ import random
 
 from environment.env import Environment
 
-env = Environment(0.29, 1.225, 2.12, 0.012, 1055, 0.0, 3.5, 0.30)
+env = Environment(0.38, 1.225, 2.29, 0.012, 1843, 0.0, 3.5, 0.345)
 print("\nParamètres du véhicule:")
 print(f"  - Masse: {env.mass} kg")
 print(f"  - Puissance max: {env.P_max / 1000} kW ({env.P_max / 1000 * 1.36:.0f} ch)")

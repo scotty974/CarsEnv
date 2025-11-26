@@ -4,12 +4,14 @@ import numpy as np
 
 ######################## Calcul régime moteur
 torque_map_rpm = [
-    (800, 60),
-    (1500, 120),
-    (2500, 180),
-    (4000, 200),
-    (6000, 160),
-    (7000, 100),
+    (800, 420),  # Couple au ralenti
+    (1500, 480),  # Montée progressive
+    (2500, 520),  # Zone intermédiaire
+    (3500, 542),  # Couple maxi à ~4600 rpm
+    (4600, 556),  # 556 Nm (couple max officiel)
+    (5500, 540),  # Début de chute
+    (6500, 500),  # Descente
+    (7500, 420),  # Zone rouge
 ]
 
 

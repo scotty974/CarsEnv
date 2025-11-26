@@ -40,14 +40,14 @@ class Environment:
         self.dt = 1.0
 
         # Paramètres moteur CORRIGÉS
-        self.F_max = 4000
-        self.v_max = 47.2
-        self.P_max = 60000  # en W
+        self.F_max = 8000
+        self.v_max = 66.66
+        self.P_max = 331000  # en W
 
         self.data = []
         self.transmission_ratio = transmission_ratio
         self.wheel_radius = wheel_radius
-        self.bsfc = 0.25  # kg/kwh
+        self.bsfc = 0.280  # kg/kwh
 
     def get_state_min(self):
         return self.state_min
@@ -84,7 +84,7 @@ class Environment:
                 T_limite = self.P_max / omega_engine
                 T_effectif = min(c, T_limite)
             else:
-                T_effectif = c  # Au démarrage (omega=0), on prend le couple de la map
+                T_effectif = 0  # Au démarrage (omega=0), on prend le couple de la map
 
             # ⚠️ CORRECTION MAJEURE : Force aux roues
             # Le couple moteur est multiplié par le rapport de transmission
